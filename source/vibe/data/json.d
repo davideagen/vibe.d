@@ -360,7 +360,7 @@ struct Json {
 		else static if (is(T == string)) return m_string;
 		else static if (is(T == Json[])) return m_array;
 		else static if (is(T == Json[string])) return m_object;
-		else static assert("JSON can only be casted to (bool, long, double, string, Json[] or Json[string]. Not "~T.stringof~".");
+		else static assert("JSON can only be cast to (bool, long, double, string, Json[] or Json[string]. Not "~T.stringof~".");
 	}
 	/// ditto
 	@property const(T) opt(T)(const(T) def = T.init)
@@ -451,7 +451,7 @@ struct Json {
 				default: return Json(["value": this]);
 				case Type.object: return m_object;
 			}
-		} else static assert("JSON can only be casted to (bool, long, double, string, Json[] or Json[string]. Not "~T.stringof~".");
+		} else static assert("JSON can only be cast to (bool, long, double, string, Json[] or Json[string]. Not "~T.stringof~".");
 	}
 
 	/**
@@ -799,33 +799,32 @@ struct Json {
 
 	Throws a JSONException if any parsing error occured.
 */
-Json parseJson(R)(ref R range, int* line = null)
+Json parseJson(R)(ref R range, int* line = null, string filename = null)
 	if( is(R == string) )
 {
 	Json ret;
-	enforceJson(!range.empty, "JSON string is empty.");
+	enforceJson(!range.empty, "JSON string is empty.", filename, 0);
 
 	skipWhitespace(range, line);
 
-	version(JsonLineNumbers){
+	version(JsonLineNumbers) {
 		import vibe.core.log;
 		int curline = line ? *line : 0;
-		scope(failure) logError("Error in line: %d", curline);
 	}
 
 	switch( range.front ){
 		case 'f':
-			enforceJson(range[1 .. $].startsWith("alse"), "Expected 'false', got '"~range[0 .. min(5, $)]~"'.");
+			enforceJson(range[1 .. $].startsWith("alse"), "Expected 'false', got '"~range[0 .. min(5, $)]~"'.", filename, line);
 			range.popFrontN(5);
 			ret = false;
 			break;
 		case 'n':
-			enforceJson(range[1 .. $].startsWith("ull"), "Expected 'null', got '"~range[0 .. min(4, $)]~"'.");
+			enforceJson(range[1 .. $].startsWith("ull"), "Expected 'null', got '"~range[0 .. min(4, $)]~"'.", filename, line);
 			range.popFrontN(4);
 			ret = null;
 			break;
 		case 't':
-			enforceJson(range[1 .. $].startsWith("rue"), "Expected 'true', got '"~range[0 .. min(4, $)]~"'.");
+			enforceJson(range[1 .. $].startsWith("rue"), "Expected 'true', got '"~range[0 .. min(4, $)]~"'.", filename, line);
 			range.popFrontN(4);
 			ret = true;
 			break;
@@ -844,13 +843,13 @@ Json parseJson(R)(ref R range, int* line = null)
 			range.popFront();
 			while (true) {
 				skipWhitespace(range, line);
-				enforceJson(!range.empty);
+				enforceJson(!range.empty, "Missing ']' before EOF.", filename, line);
 				if(range.front == ']') break;
-				arr ~= parseJson(range, line);
+				arr ~= parseJson(range, line, filename);
 				skipWhitespace(range, line);
-				enforceJson(!range.empty, "Missing ']' before EOF.");
+				enforceJson(!range.empty, "Missing ']' before EOF.", filename, line);
 				enforceJson(range.front == ',' || range.front == ']',
-					format("Expected ']' or ',' - got '%s'.", range.front));
+					format("Expected ']' or ',' - got '%s'.", range.front), filename, line);
 				if( range.front == ']' ) break;
 				else range.popFront();
 			}
@@ -862,19 +861,19 @@ Json parseJson(R)(ref R range, int* line = null)
 			range.popFront();
 			while (true) {
 				skipWhitespace(range, line);
-				enforceJson(!range.empty);
+				enforceJson(!range.empty, "Missing '}' before EOF.", filename, line);
 				if(range.front == '}') break;
 				string key = skipJsonString(range);
 				skipWhitespace(range, line);
-				enforceJson(range.startsWith(":"), "Expected ':' for key '" ~ key ~ "'");
+				enforceJson(range.startsWith(":"), "Expected ':' for key '" ~ key ~ "'", filename, line);
 				range.popFront();
 				skipWhitespace(range, line);
-				Json itm = parseJson(range, line);
+				Json itm = parseJson(range, line, filename);
 				obj[key] = itm;
 				skipWhitespace(range, line);
-				enforceJson(!range.empty, "Missing '}' before EOF.");
+				enforceJson(!range.empty, "Missing '}' before EOF.", filename, line);
 				enforceJson(range.front == ',' || range.front == '}',
-					format("Expected '}' or ',' - got '%s'.", range.front));
+					format("Expected '}' or ',' - got '%s'.", range.front), filename, line);
 				if (range.front == '}') break;
 				else range.popFront();
 			}
@@ -882,7 +881,8 @@ Json parseJson(R)(ref R range, int* line = null)
 			ret = obj;
 			break;
 		default:
-			enforceJson(false, "Expected valid json token, got '"~to!string(range.length)~range[0 .. min(12, $)]~"'.");
+			enforceJson(false, format("Expected valid JSON token, got '%s'.", range[0 .. min(12, $)]), filename, line);
+			assert(false);
 	}
 
 	assert(ret.type != Json.Type.undefined);
@@ -895,16 +895,13 @@ Json parseJson(R)(ref R range, int* line = null)
 
 	Throws a JSONException if any parsing error occurs.
 */
-Json parseJsonString(string str)
+Json parseJsonString(string str, string filename = null)
 {
 	auto strcopy = str;
-	try {
-		auto ret = parseJson(strcopy);
-		enforceJson(strcopy.strip().length == 0, "Expected end of string after JSON value.");
-		return ret;
-	} catch (Exception e) {
-		throw new JSONException(format("JSON format error at byte %s: %s", str.length - strcopy.length, e.msg));
-	}
+	int line = 0;
+	auto ret = parseJson(strcopy, &line, filename);
+	enforceJson(strcopy.strip().length == 0, "Expected end of string after JSON value.", filename, line);
+	return ret;
 }
 
 unittest {
@@ -997,7 +994,7 @@ Json serializeToJsonOld(T)(T value)
 {
 	import vibe.internal.meta.traits;
 
-	alias Unqual!T TU;
+	alias TU = Unqual!T;
 	static if (is(TU == Json)) return value;
 	else static if (is(TU == typeof(null))) return Json(null);
 	else static if (is(TU == bool)) return Json(value);
@@ -1015,7 +1012,7 @@ Json serializeToJsonOld(T)(T value)
 		return Json(ret);
 	} else static if (isAssociativeArray!TU) {
 		Json[string] ret;
-		alias KeyType!T TK;
+		alias TK = KeyType!T;
 		foreach (key, value; value) {
 			static if(is(TK == string)) {
 				ret[key] = serializeToJson(value);
@@ -1101,14 +1098,14 @@ T deserializeJsonOld(T)(Json src)
 	else static if (is(T : long)) return cast(T)src.get!long;
 	else static if (is(T : string)) return cast(T)src.get!string;
 	else static if (isArray!T) {
-		alias typeof(T.init[0]) TV;
+		alias TV = typeof(T.init[0]) ;
 		auto dst = new Unqual!TV[src.length];
 		foreach (size_t i, v; src)
 			dst[i] = deserializeJson!(Unqual!TV)(v);
 		return cast(T)dst;
 	} else static if( isAssociativeArray!T ) {
-		alias typeof(T.init.values[0]) TV;
-		alias KeyType!T TK;
+		alias TV = typeof(T.init.values[0]) ;
+		alias TK = KeyType!T;
 		Unqual!TV[TK] dst;
 		foreach (string key, value; src) {
 			static if (is(TK == string)) {
@@ -1129,7 +1126,7 @@ T deserializeJsonOld(T)(Json src)
 		T dst;
 		foreach (m; __traits(allMembers, T)) {
 			static if (isRWPlainField!(T, m) || isRWField!(T, m)) {
-				alias typeof(__traits(getMember, dst, m)) TM;
+				alias TM = typeof(__traits(getMember, dst, m)) ;
 				__traits(getMember, dst, m) = deserializeJson!TM(src[underscoreStrip(m)]);
 			}
 		}
@@ -1139,14 +1136,14 @@ T deserializeJsonOld(T)(Json src)
 		auto dst = new T;
 		foreach (m; __traits(allMembers, T)) {
 			static if (isRWPlainField!(T, m) || isRWField!(T, m)) {
-				alias typeof(__traits(getMember, dst, m)) TM;
+				alias TM = typeof(__traits(getMember, dst, m)) ;
 				__traits(getMember, dst, m) = deserializeJson!TM(src[underscoreStrip(m)]);
 			}
 		}
 		return dst;
 	} else static if (isPointer!T) {
 		if (src.type == Json.Type.null_) return null;
-		alias typeof(*T.init) TD;
+		alias TD = typeof(*T.init) ;
 		dst = new TD;
 		*dst = deserializeJson!TD(src);
 		return dst;
@@ -1366,8 +1363,13 @@ struct JsonSerializer {
 	{
 		static if (is(T == Json)) return m_current;
 		else static if (isJsonSerializable!T) return T.fromJson(m_current);
-		else static if (is(T == float) || is(T == double)) return m_current.type == Json.Type.float_ ? cast(T)m_current.get!double : cast(T)m_current.get!long;
-		else return m_current.get!T();
+		else static if (is(T == float) || is(T == double)) {
+			if (m_current.type == Json.Type.undefined) return T.nan;
+			return m_current.type == Json.Type.float_ ? cast(T)m_current.get!double : cast(T)m_current.get!long;
+		}
+		else {
+			return m_current.get!T();
+		}
 	}
 
 	bool tryReadNull() { return m_current.type == Json.Type.null_; }
@@ -1387,7 +1389,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 		size_t m_level = 0;
 	}
 
-	template isJsonBasicType(T) { enum isJsonBasicType = is(T : long) || is(T : real) || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
+	template isJsonBasicType(T) { enum isJsonBasicType = isNumeric!T || isBoolean!T || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
 
 	template isSupportedValueType(T) { enum isSupportedValueType = isJsonBasicType!T || is(T == Json); }
 
@@ -1430,7 +1432,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 			static if (is(T == typeof(null))) m_range.put("null");
 			else static if (is(T == bool)) m_range.put(value ? "true" : "false");
 			else static if (is(T : long)) m_range.formattedWrite("%s", value);
-			else static if (is(T : real)) m_range.formattedWrite("%s", value);
+			else static if (is(T : real)) m_range.formattedWrite("%.16g", value);
 			else static if (is(T == string)) {
 				m_range.put('"');
 				m_range.jsonEscape(value);
@@ -1545,7 +1547,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 			} else static if (is(T : long)) {
 				bool is_float;
 				auto num = m_range.skipNumber(is_float);
-				enforceJson(!is_float, "Expecing integer number.");
+				enforceJson(!is_float, "Expecting integer number.");
 				return to!T(num);
 			} else static if (is(T : real)) {
 				bool is_float;
@@ -1599,7 +1601,13 @@ void writeJsonString(R, bool pretty = false)(ref R dst, in Json json, size_t lev
 		case Json.Type.null_: dst.put("null"); break;
 		case Json.Type.bool_: dst.put(cast(bool)json ? "true" : "false"); break;
 		case Json.Type.int_: formattedWrite(dst, "%d", json.get!long); break;
-		case Json.Type.float_: formattedWrite(dst, "%.16g", json.get!double); break;
+		case Json.Type.float_: 
+			auto d = json.get!double;
+			if (d != d) 
+				dst.put("undefined"); // JSON has no NaN value so set null
+			else
+				formattedWrite(dst, "%.16g", json.get!double); 
+			break;
 		case Json.Type.string:
 			dst.put('\"');
 			jsonEscape(dst, cast(string)json);
@@ -1701,7 +1709,17 @@ unittest {
 	assert(d == a[0..$-2]);
 }
 
+unittest {
+	auto j = Json(double.init);
 
+	assert(j.toString == "undefined"); // A double nan should serialize to undefined
+	j = 17.04f;
+	assert(j.toString == "17.04");	// A proper double should serialize correctly
+
+	double d;
+	deserializeJson(d, Json.undefined); // Json.undefined should deserialize to nan
+	assert(d != d);
+}
 /**
 	Writes the given JSON object as a prettified JSON string into the destination range.
 
@@ -1937,4 +1955,16 @@ private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool co
 {
 	static if (__VERSION__ >= 2065) enforceEx!JSONException(cond, message, file, line);
 	else if (!cond) throw new JSONException(message);
+}
+
+private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool cond, lazy string message, string err_file, int err_line)
+{
+	auto errmsg = format("%s(%s): Error: %s", err_file, err_line+1, message);
+	static if (__VERSION__ >= 2065) enforceEx!JSONException(cond, errmsg, file, line);
+	else if (!cond) throw new JSONException(errmsg);
+}
+
+private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool cond, lazy string message, string err_file, int* err_line)
+{
+	enforceJson!(file, line)(cond, message, err_file, err_line ? *err_line : -1);
 }

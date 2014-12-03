@@ -75,7 +75,7 @@
 			// deserialization
 			void readDictionary(T)(scope void delegate(string) entry_callback);
 			void readArray(T)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback);
-			void readValue(T)();
+			T readValue(T)();
 			bool tryReadNull();
 		}
 		---
@@ -185,7 +185,7 @@ private void serializeImpl(Serializer, T, ATTRIBUTES...)(ref Serializer serializ
 	static assert(Serializer.isSupportedValueType!string, "All serializers must support string values.");
 	static assert(Serializer.isSupportedValueType!(typeof(null)), "All serializers must support null values.");
 
-	alias Unqual!T TU;
+	alias TU = Unqual!T;
 
 	static if (is(TU == enum)) {
 		static if (hasAttributeL!(ByNameAttribute, ATTRIBUTES)) {
@@ -244,7 +244,7 @@ private void serializeImpl(Serializer, T, ATTRIBUTES...)(ref Serializer serializ
 	} else static if (/*isInstanceOf!(Nullable, TU)*/is(T == Nullable!TPS, TPS...)) {
 		if (value.isNull()) serializeImpl!(Serializer, typeof(null))(serializer, null);
 		else serializeImpl!(Serializer, typeof(value.get()), ATTRIBUTES)(serializer, value.get());
-	} else static if (isCustomSerializable!T) {
+	} else static if (isCustomSerializable!TU) {
 		alias CustomType = typeof(T.init.toRepresentation());
 		serializeImpl!(Serializer, CustomType, ATTRIBUTES)(serializer, value.toRepresentation());
 	} else static if (isISOExtStringSerializable!TU) {

@@ -220,30 +220,17 @@ private Task runTask_internal(ref TaskFuncInfo tfi)
 void runWorkerTask(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (is(typeof(*func) == function))
 {
-	import std.traits : ParameterTypeTuple;
-
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-
-	runWorkerTask_unsafe!(FT, FARGS)(func, args);
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+	runWorkerTask_unsafe(func, args);
 }
 
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
 {
-	import std.traits : ParameterTypeTuple;
-
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 	auto func = &__traits(getMember, object, __traits(identifier, method));
-	alias FT = typeof(func);
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-
-	runWorkerTask_unsafe!(FT, FARGS)(func, args);
+	runWorkerTask_unsafe(func, args);
 }
 
 /**
@@ -258,19 +245,14 @@ void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS arg
 Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (is(typeof(*func) == function))
 {
-	import std.traits : ParameterTypeTuple;
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-
-	alias Typedef!(Task, Task.init, __PRETTY_FUNCTION__) PrivateTask;
+	alias PrivateTask = Typedef!(Task, Task.init, __PRETTY_FUNCTION__);
 	Task caller = Task.getThis();
-	static void taskFun(Task caller, FT func, ref ARGS args) {
+	static void taskFun(Task caller, FT func, ARGS args) {
 		PrivateTask callee = Task.getThis();
 		caller.prioritySend(callee);
-		func(args);
+		mixin(callWithMove!ARGS("func", "args"));
 	}
 	runWorkerTask_unsafe(&taskFun, caller, func, args);
 	return cast(Task)receiveOnly!PrivateTask();
@@ -279,21 +261,17 @@ Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
 {
-	import std.traits : ParameterTypeTuple;
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
 	auto func = &__traits(getMember, object, __traits(identifier, method));
 	alias FT = typeof(func);
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
-	alias Typedef!(Task, Task.init, __PRETTY_FUNCTION__) PrivateTask;
+	alias PrivateTask = Typedef!(Task, Task.init, __PRETTY_FUNCTION__);
 	Task caller = Task.getThis();
-	static void taskFun(Task caller, FT func, ref ARGS args) {
+	static void taskFun(Task caller, FT func, ARGS args) {
 		PrivateTask callee = Task.getThis();
 		caller.prioritySend(callee);
-		func(args);
+		mixin(callWithMove!ARGS("func", "args"));
 	}
 	runWorkerTask_unsafe(&taskFun, caller, func, args);
 	return cast(Task)receiveOnly!PrivateTask();
@@ -392,9 +370,16 @@ unittest {
 	}
 }
 
-// no auto ref because of Bugzilla 13140
-private void runWorkerTask_unsafe(CALLABLE, ARGS...)(CALLABLE callable, /*auto ref*/ ARGS args)
+private void runWorkerTask_unsafe(CALLABLE, ARGS...)(CALLABLE callable, ref ARGS args)
 {
+	import std.traits : ParameterTypeTuple;
+	import vibe.internal.meta.traits : areConvertibleTo;
+	import vibe.internal.meta.typetuple;
+
+	alias FARGS = ParameterTypeTuple!CALLABLE;
+	static assert(areConvertibleTo!(Group!ARGS, Group!FARGS),
+		"Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
+
 	setupWorkerThreads();
 
 	auto tfi = makeTaskFuncInfo(callable, args);
@@ -402,6 +387,7 @@ private void runWorkerTask_unsafe(CALLABLE, ARGS...)(CALLABLE callable, /*auto r
 	synchronized (st_threadsMutex) st_workerTasks ~= tfi;
 	st_threadsSignal.emit();
 }
+
 
 /**
 	Runs a new asynchronous task in all worker threads concurrently.
@@ -413,33 +399,28 @@ private void runWorkerTask_unsafe(CALLABLE, ARGS...)(CALLABLE callable, /*auto r
 void runWorkerTaskDist(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (is(typeof(*func) == function))
 {
-	import std.traits : ParameterTypeTuple;
-
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-
-	runWorkerTaskDist_unsafe!(FT, FARGS)(func, args);
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+	runWorkerTaskDist_unsafe(func, args);
 }
 /// ditto
 void runWorkerTaskDist(alias method, T, ARGS...)(shared(T) object, ARGS args)
 {
-	import std.traits : ParameterTypeTuple;
-
 	auto func = &__traits(getMember, object, __traits(identifier, method));
-	alias FT = typeof(func);
-	alias FARGS = ParameterTypeTuple!FT;
-	static assert(__traits(compiles, {FARGS fargs = args;}),
-				  "Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
-	foreach (T; FARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+	foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
-	runWorkerTaskDist_unsafe!(FT, FARGS)(func, args);
+	runWorkerTaskDist_unsafe(func, args);
 }
 
-// no auto ref because of Bugzilla 13140
-private void runWorkerTaskDist_unsafe(CALLABLE, ARGS...)(CALLABLE callable, /*auto ref*/ ARGS args)
+private void runWorkerTaskDist_unsafe(CALLABLE, ARGS...)(ref CALLABLE callable, ref ARGS args)
 {
+	import std.traits : ParameterTypeTuple;
+	import vibe.internal.meta.traits : areConvertibleTo;
+	import vibe.internal.meta.typetuple;
+
+	alias FARGS = ParameterTypeTuple!CALLABLE;
+	static assert(areConvertibleTo!(Group!ARGS, Group!FARGS),
+		"Cannot convert arguments '"~ARGS.stringof~"' to function arguments '"~FARGS.stringof~"'.");
+
 	setupWorkerThreads();
 
 	auto tfi = makeTaskFuncInfo(callable, args);
@@ -452,9 +433,12 @@ private void runWorkerTaskDist_unsafe(CALLABLE, ARGS...)(CALLABLE callable, /*au
 	st_threadsSignal.emit();
 }
 
-private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(CALLABLE callable, auto ref ARGS args)
+private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(ref CALLABLE callable, ref ARGS args)
 {
-	alias TARGS = Tuple!ARGS;
+	import std.algorithm : move;
+	import std.traits : hasElaborateAssign;
+
+	struct TARGS { ARGS expand; }
 
 	static assert(CALLABLE.sizeof <= TaskFuncInfo.callable.length);
 	static assert(TARGS.sizeof <= maxTaskParameterSize,
@@ -464,23 +448,29 @@ private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(CALLABLE callable, auto
 	static void callDelegate(TaskFuncInfo* tfi) {
 		assert(tfi.func is &callDelegate);
 
-		// copy original call data
-		auto c = tfi.callable.reinterpretAs!CALLABLE();
-		auto args = tfi.args.reinterpretAs!TARGS;
+		// copy original call data to stack
+		CALLABLE c;
+		TARGS args;
+		move(*(cast(CALLABLE*)tfi.callable.ptr), c);
+		move(*(cast(TARGS*)tfi.args.ptr), args);
 
-		// reset the info and destroy the original data
+		// reset the info
 		tfi.func = null;
-		destroy(tfi.callable.reinterpretAs!CALLABLE);
-		destroy(tfi.args.reinterpretAs!TARGS);
 
 		// make the call
-		c(args.expand);
+		mixin(callWithMove!ARGS("c", "args.expand"));
 	}
 
 	TaskFuncInfo tfi;
 	tfi.func = &callDelegate;
-	emplace(cast(CALLABLE*)tfi.callable.ptr, callable);
-	emplace(cast(TARGS*)tfi.args.ptr, tuple(args));
+	static if (hasElaborateAssign!CALLABLE) tfi.initCallable!CALLABLE();
+	static if (hasElaborateAssign!TARGS) tfi.initArgs!TARGS();
+
+	tfi.typedCallable!CALLABLE = callable;
+	foreach (i, A; ARGS) {
+		static if (needsMove!A) args[i].move(tfi.typedArgs!TARGS.expand[i]);
+		else tfi.typedArgs!TARGS.expand[i] = args[i];
+	}
 	return tfi;
 }
 
@@ -525,6 +515,8 @@ void rawYield()
 */
 void sleep(Duration timeout)
 {
+	assert(timeout >= 0.seconds, "Argument to sleep must not be negative.");
+	if (timeout <= 0.seconds) return;
 	auto tm = setTimer(timeout, null);
 	tm.wait();
 }
@@ -615,14 +607,21 @@ FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescripto
 
 
 /**
-	Sets the stack size for tasks.
+	Sets the stack size to use for tasks.
 
-	The default stack size is set to 16 KiB, which is sufficient for most tasks.
-	Tuning this value can be used to reduce memory usage for great numbers of
-	concurrent tasks or to enable applications with heavy stack use.
+	The default stack size is set to 512 KiB on 32-bit systems and to 16 MiB
+	on 64-bit systems, which is sufficient for most tasks. Tuning this value
+	can be used to reduce memory usage for large numbers of concurrent tasks
+	or to avoid stack overflows for applications with heavy stack use.
 
-	Note that this function must be called before any task is started to have an
-	effect.
+	Note that this function must be called at initialization time, before any
+	task is started to have an effect.
+
+	Also note that the stack will initially not consume actual physical memory -
+	it just reserves virtual address space. Only once the stack gets actually
+	filled up with data will physical memory then be reserved page by page. This
+	means that the stack can safely be set to large sizes on 64-bit systems
+	without having to worry about memory usage.
 */
 void setTaskStackSize(size_t sz)
 {
@@ -683,7 +682,7 @@ void setTaskEventCallback(void function(TaskEvent, Task) func)
 /**
 	A version string representing the current vibe version
 */
-enum vibeVersionString = "0.7.20";
+enum vibeVersionString = "0.7.21";
 
 /// Compatibility alias
 deprecated("Use vibeVersionString instead.") alias VibeVersionString = vibeVersionString;
@@ -1097,7 +1096,7 @@ private class VibeDriverCore : DriverCore {
 
 			// always pass Errors on
 			if (auto err = cast(Error)th) throw err;
-		}
+		} else assert(!uncaught_exception, "Fiber returned exception object that is not a Throwable!?");
 	}
 
 	void notifyIdle()
@@ -1149,6 +1148,30 @@ private struct TaskFuncInfo {
 	void function(TaskFuncInfo*) func;
 	void[2*size_t.sizeof] callable = void;
 	void[maxTaskParameterSize] args = void;
+
+	@property ref C typedCallable(C)()
+	{
+		static assert(C.sizeof <= callable.sizeof);
+		return *cast(C*)callable.ptr;
+	}
+
+	@property ref A typedArgs(A)()
+	{
+		static assert(A.sizeof <= args.sizeof);
+		return *cast(A*)args.ptr;
+	}
+
+	void initCallable(C)()
+	{
+		C cinit;
+		this.callable[0 .. C.sizeof] = cast(void[])(&cinit)[0 .. 1];
+	}
+
+	void initArgs(A)()
+	{
+		A ainit;
+		this.args[0 .. A.sizeof] = cast(void[])(&ainit)[0 .. 1];
+	}
 }
 
 alias TaskArgsVariant = VariantN!maxTaskParameterSize;
@@ -1158,8 +1181,11 @@ alias TaskArgsVariant = VariantN!maxTaskParameterSize;
 /**************************************************************************************************/
 
 private {
+	static if ((void*).sizeof >= 8) enum defaultTaskStackSize = 16*1024*1024;
+	else enum defaultTaskStackSize = 512*1024;
+
 	__gshared VibeDriverCore s_core;
-	__gshared size_t s_taskStackSize = 16*4096;
+	__gshared size_t s_taskStackSize = defaultTaskStackSize;
 
 	__gshared core.sync.mutex.Mutex st_threadsMutex;
 	__gshared ManualEvent st_threadsSignal;
@@ -1420,7 +1446,7 @@ static if (__VERSION__ <= 2065) @property bool nogc() { return false; }
 private extern(C) void onSignal(int signal)
 nothrow {
 	atomicStore(st_term, true);
-	try st_threadsSignal.emit(); catch {}
+	try st_threadsSignal.emit(); catch (Throwable) {}
 
 	logInfo("Received signal %d. Shutting down.", signal);
 }
@@ -1517,5 +1543,22 @@ private struct CoreTaskQueue {
 	}
 }
 
-// helper for a reinterpret cast of a blob of memory
-private ref T reinterpretAs(T)(void[] mem) { return (cast(T[])mem[0 .. T.sizeof])[0]; }
+// mixin string helper to call a function with arguments that potentially have
+// to be moved
+private string callWithMove(ARGS...)(string func, string args)
+{
+	import std.string;
+	string ret = func ~ "(";
+	foreach (i, T; ARGS) {
+		if (i > 0) ret ~= ", ";
+		ret ~= format("%s[%s]", args, i);
+		static if (needsMove!T) ret ~= ".move";
+	}
+	return ret ~ ");";
+}
+
+private template needsMove(T)
+{
+	// FIXME: reverse the condition and only call .move for non-copyable types!
+	enum needsMove = is(typeof(T.init.move));
+}

@@ -485,7 +485,7 @@ final class HTTPClient {
 				}
 
 				import std.functional : memoize;
-				alias memoize!getAddressType findAddressType;
+				alias findAddressType = memoize!getAddressType;
 
 				bool use_dns;
 				if (findAddressType(m_settings.proxyURL.host) == AddressType.Host)
@@ -680,14 +680,15 @@ final class HTTPClientRequest : HTTPRequest {
 			return;
 
 		// force the request to be sent
-		if (!m_headerWritten) bodyWriter();
-
-		m_bodyWriter.flush();
-		if (m_bodyWriter !is m_conn) {
-			m_bodyWriter.finalize();
-			m_conn.flush();
+		if (!m_headerWritten) writeHeader();
+		else {
+			bodyWriter.flush();
+			if (m_bodyWriter !is m_conn) {
+				m_bodyWriter.finalize();
+				m_conn.flush();
+			}
+			m_bodyWriter = null;
 		}
-		m_bodyWriter = null;
 	}
 
 	private string clengthString(ulong len)

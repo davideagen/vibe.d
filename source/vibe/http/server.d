@@ -113,11 +113,11 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 {
 	import std.algorithm : canFind;
 
-	static bool doListen(HTTPServerSettings settings, HTTPServerListener listener, string addr)
+	static bool doListen(HTTPServerSettings settings, size_t listener_idx, string addr)
 	{
 		try {
 			bool dist = (settings.options & HTTPServerOption.distribute) != 0;
-			listenTCP(settings.port, (TCPConnection conn){ handleHTTPConnection(conn, listener); }, addr, dist ? TCPListenOptions.distribute : TCPListenOptions.defaults);
+			listenTCP(settings.port, (TCPConnection conn){ handleHTTPConnection(conn, g_listeners[listener_idx]); }, addr, dist ? TCPListenOptions.distribute : TCPListenOptions.defaults);
 			logInfo("Listening for HTTP%s requests on %s:%s", settings.sslContext ? "S" : "", addr, settings.port);
 			return true;
 		} catch( Exception e ) {
@@ -126,40 +126,66 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 		}
 	}
 
-	bool any_succeeded = false;
+	void addVHost(ref HTTPServerListener lst)
+	{
+		SSLContext onSNI(string servername)
+		{
+			foreach (ctx; g_contexts)
+				if (ctx.settings.bindAddresses.canFind(lst.bindAddress)
+					&& ctx.settings.port == lst.bindPort
+					&& ctx.settings.hostName.icmp(servername) == 0)
+				{
+					logDebug("Found context for SNI host '%s'.", servername);
+					return ctx.settings.sslContext;
+				}
+			logDebug("No context found for SNI host '%s'.", servername);
+			return null;
+		}
+
+		if (settings.sslContext !is lst.sslContext && lst.sslContext.kind != SSLContextKind.serverSNI) {
+			logDebug("Create SNI SSL context for %s, port %s", lst.bindAddress, lst.bindPort);
+			lst.sslContext = createSSLContext(SSLContextKind.serverSNI);
+			lst.sslContext.sniCallback = &onSNI;
+		}
+
+		foreach (ctx; g_contexts) {
+			if (ctx.settings.port != settings.port) continue;
+			if (!ctx.settings.bindAddresses.canFind(lst.bindAddress)) continue;
+			/*enforce(ctx.settings.hostName != settings.hostName,
+				"A server with the host name '"~settings.hostName~"' is already "
+				"listening on "~addr~":"~to!string(settings.port)~".");*/
+		}
+	}
+
+	bool any_successful = false;
 
 	// Check for every bind address/port, if a new listening socket needs to be created and
 	// check for conflicting servers
 	foreach (addr; settings.bindAddresses) {
 		bool found_listener = false;
-		foreach (lst; g_listeners) {
+		foreach (i, ref lst; g_listeners) {
 			if (lst.bindAddress == addr && lst.bindPort == settings.port) {
-				enforce(settings.sslContext is lst.sslContext,
-					"A HTTP server is already listening on "~addr~":"~to!string(settings.port)~
-					" but the SSL context differs.");
-				foreach (ctx; g_contexts) {
-					if (ctx.settings.port != settings.port) continue;
-					if (!ctx.settings.bindAddresses.canFind(addr)) continue;
-					/*enforce(ctx.settings.hostName != settings.hostName,
-						"A server with the host name '"~settings.hostName~"' is already "
-						"listening on "~addr~":"~to!string(settings.port)~".");*/
-				}
+				addVHost(lst);
+				assert(!settings.sslContext || settings.sslContext is lst.sslContext
+					|| lst.sslContext.kind == SSLContextKind.serverSNI,
+					format("Got multiple overlapping SSL bind addresses (port %s), but no SNI SSL context!?", settings.port));
 				found_listener = true;
-				any_succeeded = true;
+				any_successful = true;
 				break;
 			}
 		}
 		if (!found_listener) {
 			auto listener = HTTPServerListener(addr, settings.port, settings.sslContext);
-			if (doListen(settings, listener, addr)) // DMD BUG 2043
+			if (doListen(settings, g_listeners.length, addr)) // DMD BUG 2043
 			{
-				any_succeeded = true;
+				found_listener = true;
+				any_successful = true;
 				g_listeners ~= listener;
 			}
 		}
 	}
 
-	enforce(any_succeeded, "Failed to listen for incoming HTTP connections on any of the supplied interfaces.");
+	enforce(any_successful, "Failed to listen for incoming HTTP connections on any of the supplied interfaces.");
 }
 
 
@@ -179,7 +205,7 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 
 	Params:
 		url = The URL to redirect to
-		status = Redirection status to use (by default this is $(D HTTPStatus.found)
+		status = Redirection status to use $(LPAREN)by default this is $(D HTTPStatus.found)$(RPAREN).
 
 	Returns:
 		Returns a $(D HTTPServerRequestDelegate) that performs the redirect
@@ -601,6 +627,8 @@ final class HTTPServerRequest : HTTPRequest {
 
 		/** Contains all _form fields supplied using the _query string.
 
+			The fields are stored in the same order as they are received.
+
 			Remarks: This field is only set if HTTPServerOption.parseQueryString is set.
 		*/
 		FormFields query;
@@ -634,6 +662,8 @@ final class HTTPServerRequest : HTTPRequest {
 		Json json;
 
 		/** Contains the parsed parameters of a HTML POST _form request.
+
+			The fields are stored in the same order as they are received.
 
 			Remarks:
 				This field is only set if HTTPServerOption.parseFormBody is set.
@@ -1002,8 +1032,8 @@ final class HTTPServerResponse : HTTPResponse {
 		else secure = this.ssl;
 
 		m_session = m_settings.sessionStore.create();
-		m_session["$sessionCookiePath"] = path;
-		m_session["$sessionCookieSecure"] = secure.to!string();
+		m_session.set("$sessionCookiePath", path);
+		m_session.set("$sessionCookieSecure", secure);
 		auto cookie = setCookie(m_settings.sessionIdCookie, m_session.id, path);
 		cookie.secure = secure;
 		cookie.httpOnly = (options & SessionOption.httpOnly) != 0;
@@ -1016,8 +1046,8 @@ final class HTTPServerResponse : HTTPResponse {
 	void terminateSession()
 	{
 		assert(m_session, "Try to terminate a session, but none is started.");
-		auto cookie = setCookie(m_settings.sessionIdCookie, null, m_session["$sessionCookiePath"]);
-		cookie.secure = m_session["$sessionCookieSecure"].to!bool();
+		auto cookie = setCookie(m_settings.sessionIdCookie, null, m_session.get!string("$sessionCookiePath"));
+		cookie.secure = m_session.get!bool("$sessionCookieSecure");
 		m_session.destroy();
 		m_session = Session.init;
 	}
@@ -1056,12 +1086,36 @@ final class HTTPServerResponse : HTTPResponse {
 		compileDietFileCompatV!(template_file, TYPES_AND_NAMES)(bodyWriter, _argptr, _arguments);
 	}
 
+	/**
+		Waits until either the connection closes or until the given timeout is
+		reached.
+
+		Returns:
+			$(D true) if the connection was closed and $(D false) when the
+			timeout was reached.
+	*/
+	bool waitForConnectionClose(Duration timeout = Duration.max)
+	{
+		if (!m_rawConnection || !m_rawConnection.connected) return true;
+		m_rawConnection.waitForData(timeout);
+		return !m_rawConnection.connected;
+	}
+
 	// Finalizes the response. This is called automatically by the server.
 	private void finalize()
 	{
-		if (m_gzipOutputStream) m_gzipOutputStream.finalize();
-		if (m_deflateOutputStream) m_deflateOutputStream.finalize();
-		if (m_chunkedBodyWriter) m_chunkedBodyWriter.finalize();
+		if (m_gzipOutputStream) {
+			m_gzipOutputStream.finalize();
+			m_gzipOutputStream.destroy();
+		}
+		if (m_deflateOutputStream) {
+			m_deflateOutputStream.finalize();
+			m_deflateOutputStream.destroy();
+		}
+		if (m_chunkedBodyWriter) {
+			m_chunkedBodyWriter.finalize();
+			m_chunkedBodyWriter.destroy();
+		}
 
 		// ignore exceptions caused by an already closed connection - the client
 		// may have closed the connection already and this doesn't usually indicate
@@ -1075,6 +1129,9 @@ final class HTTPServerResponse : HTTPResponse {
 			logDebug("HTTP response only written partially before finalization. Terminating connection.");
 			m_rawConnection.close();
 		}
+
+		m_conn = null;
+		m_rawConnection = null;
 	}
 
 	private void writeHeader()
@@ -1202,6 +1259,11 @@ private void handleHTTPConnection(TCPConnection connection, HTTPServerListener l
 {
 	Stream http_stream = connection;
 
+	version(VibeNoSSL) {} else {
+		import std.traits : ReturnType;
+		ReturnType!createSSLStreamFL ssl_stream;
+	}
+
 	if (!connection.waitForData(10.seconds())) {
 		logDebug("Client didn't send the initial request in a timely manner. Closing connection.");
 		return;
@@ -1211,9 +1273,7 @@ private void handleHTTPConnection(TCPConnection connection, HTTPServerListener l
 	if (listen_info.sslContext) {
 		version (VibeNoSSL) assert(false, "No SSL support compiled in (VibeNoSSL)");
 		else {
-			import std.traits : ReturnType;
-			ReturnType!createSSLStreamFL ssl_stream;
-			logTrace("accept ssl");
+			logDebug("Accept SSL connection: %s", listen_info.sslContext.kind);
 			// TODO: reverse DNS lookup for peer_name of the incoming connection for SSL client certificate verification purposes
 			ssl_stream = createSSLStreamFL(http_stream, listen_info.sslContext, SSLStreamState.accepting, null, connection.remoteAddress);
 			http_stream = ssl_stream;
@@ -1323,8 +1383,16 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		logTrace("Got request header.");
 
 		// find the matching virtual host
+		string reqhost;
+		ushort reqport = 0;
+		auto reqhostparts = req.host.splitter(":");
+		if (!reqhostparts.empty) { reqhost = reqhostparts.front; reqhostparts.popFront(); }
+		if (!reqhostparts.empty) { reqport = reqhostparts.front.to!ushort; reqhostparts.popFront(); }
+		enforce(reqhostparts.empty, "Invalid suffix found in host header");
 		foreach (ctx; g_contexts)
-			if (icmp2(ctx.settings.hostName, req.host) == 0) {
+			if (icmp2(ctx.settings.hostName, reqhost) == 0 &&
+				(!reqport || reqport == ctx.settings.port))
+			{
 				if (ctx.settings.port != listen_info.bindPort) continue;
 				bool found = false;
 				foreach (addr; ctx.settings.bindAddresses)
